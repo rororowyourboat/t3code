@@ -1,10 +1,12 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Minimal NDJSON JSON-RPC "agent" for ACP client tests.
  * Reads stdin lines; writes responses/notifications to stdout.
  */
 import * as readline from "node:readline";
 import { appendFileSync } from "node:fs";
+
+import { AGENT_METHODS, CLIENT_METHODS } from "effect-acp/schema";
 
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 const requestLogPath = process.env.T3_ACP_REQUEST_LOG_PATH;
@@ -51,7 +53,7 @@ const availableModes = [
 ];
 const pendingPermissionRequests = new Map();
 
-function send(obj) {
+function send(obj: unknown) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
 }
 
@@ -62,10 +64,10 @@ function modeState() {
   };
 }
 
-function sendSessionUpdate(update, session = sessionId) {
+function sendSessionUpdate(update: unknown, session = sessionId) {
   send({
     jsonrpc: "2.0",
-    method: "session/update",
+    method: CLIENT_METHODS.session_update,
     params: {
       sessionId: session,
       update,
@@ -87,8 +89,13 @@ rl.on("line", (line) => {
     appendFileSync(requestLogPath, `${JSON.stringify(msg)}\n`, "utf8");
   }
 
-  const id = msg.id;
-  const method = msg.method;
+  const rpcMessage = msg as {
+    id?: number | string;
+    method?: string;
+    params?: Record<string, unknown>;
+  };
+  const id = rpcMessage.id;
+  const method = rpcMessage.method;
 
   if (method === undefined && id !== undefined && pendingPermissionRequests.has(id)) {
     const pending = pendingPermissionRequests.get(id);
@@ -123,7 +130,7 @@ rl.on("line", (line) => {
     return;
   }
 
-  if (method === "initialize" && id !== undefined) {
+  if (method === AGENT_METHODS.initialize && id !== undefined) {
     send({
       jsonrpc: "2.0",
       id,
@@ -135,12 +142,12 @@ rl.on("line", (line) => {
     return;
   }
 
-  if (method === "authenticate" && id !== undefined) {
+  if (method === AGENT_METHODS.authenticate && id !== undefined) {
     send({ jsonrpc: "2.0", id, result: { authenticated: true } });
     return;
   }
 
-  if (method === "session/new" && id !== undefined) {
+  if (method === AGENT_METHODS.session_new && id !== undefined) {
     send({
       jsonrpc: "2.0",
       id,
@@ -153,14 +160,14 @@ rl.on("line", (line) => {
     return;
   }
 
-  if (method === "session/load" && id !== undefined) {
-    const requestedSessionId = msg.params?.sessionId ?? sessionId;
+  if (method === AGENT_METHODS.session_load && id !== undefined) {
+    const requestedSessionId = rpcMessage.params?.sessionId ?? sessionId;
     sendSessionUpdate(
       {
         sessionUpdate: "user_message_chunk",
         content: { type: "text", text: "replay" },
       },
-      requestedSessionId,
+      String(requestedSessionId),
     );
     send({
       jsonrpc: "2.0",
@@ -173,9 +180,9 @@ rl.on("line", (line) => {
     return;
   }
 
-  if (method === "session/set_config_option" && id !== undefined) {
-    const configId = msg.params?.configId;
-    const value = msg.params?.value;
+  if (method === AGENT_METHODS.session_set_config_option && id !== undefined) {
+    const configId = rpcMessage.params?.configId;
+    const value = rpcMessage.params?.value;
     if (configId === "model" && typeof value === "string") {
       currentModelId = value;
     }
@@ -187,8 +194,8 @@ rl.on("line", (line) => {
     return;
   }
 
-  if (method === "session/prompt" && id !== undefined) {
-    const requestedSessionId = msg.params?.sessionId ?? sessionId;
+  if (method === AGENT_METHODS.session_prompt && id !== undefined) {
+    const requestedSessionId = String(rpcMessage.params?.sessionId ?? sessionId);
     if (emitToolCalls) {
       const toolCallId = "tool-call-1";
       const permissionRequestId = nextRequestId++;
@@ -221,7 +228,7 @@ rl.on("line", (line) => {
       send({
         jsonrpc: "2.0",
         id: permissionRequestId,
-        method: "session/request_permission",
+        method: CLIENT_METHODS.session_request_permission,
         params: {
           sessionId: requestedSessionId,
           toolCall: {
@@ -282,12 +289,15 @@ rl.on("line", (line) => {
     return;
   }
 
-  if ((method === "session/set_mode" || method === "session/mode/set") && id !== undefined) {
+  if (
+    (method === AGENT_METHODS.session_set_mode || method === "session/mode/set") &&
+    id !== undefined
+  ) {
     const nextModeId =
-      typeof msg.params?.modeId === "string"
-        ? msg.params.modeId
-        : typeof msg.params?.mode === "string"
-          ? msg.params.mode
+      typeof rpcMessage.params?.modeId === "string"
+        ? rpcMessage.params.modeId
+        : typeof rpcMessage.params?.mode === "string"
+          ? rpcMessage.params.mode
           : undefined;
     if (typeof nextModeId === "string" && nextModeId.trim()) {
       currentModeId = nextModeId.trim();
@@ -296,12 +306,14 @@ rl.on("line", (line) => {
         currentModeId,
       });
     }
-    send({ jsonrpc: "2.0", id, result: null });
+    send({ jsonrpc: "2.0", id, result: {} });
     return;
   }
 
-  if (method === "session/cancel" && id !== undefined) {
-    send({ jsonrpc: "2.0", id, result: null });
+  if (method === AGENT_METHODS.session_cancel) {
+    if (id !== undefined) {
+      send({ jsonrpc: "2.0", id, result: null });
+    }
     return;
   }
 
