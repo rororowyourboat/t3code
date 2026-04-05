@@ -3,6 +3,7 @@ import {
   ArrowUpDownIcon,
   ChevronRightIcon,
   FolderIcon,
+  FolderOpenIcon,
   GitPullRequestIcon,
   PlusIcon,
   SettingsIcon,
@@ -112,6 +113,7 @@ import { isNonEmpty as isNonEmptyString } from "effect/String";
 import {
   getVisibleSidebarThreadIds,
   getVisibleThreadsForProject,
+  groupProjectsForSidebar,
   resolveAdjacentThreadId,
   isContextMenuPointerDown,
   resolveProjectStatusIndicator,
@@ -124,6 +126,7 @@ import {
   sortProjectsForSidebar,
   sortThreadsForSidebar,
   useThreadJumpHintVisibility,
+  type SidebarSection,
 } from "./Sidebar.logic";
 import { SidebarUpdatePill } from "./sidebar/SidebarUpdatePill";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
@@ -665,20 +668,80 @@ function SortableProjectItem({
   );
 }
 
+function SidebarGroupHeader({
+  groupId,
+  groupName,
+  expanded,
+  onToggle,
+  onContextMenu,
+}: {
+  groupId: string;
+  groupName: string;
+  expanded: boolean;
+  onToggle: (groupId: string) => void;
+  onContextMenu: (groupId: string, groupName: string, position: { x: number; y: number }) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="flex w-full items-center gap-1.5 px-2 py-1 text-left"
+      onClick={() => onToggle(groupId)}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        onContextMenu(groupId, groupName, { x: event.clientX, y: event.clientY });
+      }}
+    >
+      {expanded ? (
+        <FolderOpenIcon className="size-3 shrink-0 text-muted-foreground/50" />
+      ) : (
+        <FolderIcon className="size-3 shrink-0 text-muted-foreground/50" />
+      )}
+      <span className="flex-1 truncate text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
+        {groupName}
+      </span>
+      <ChevronRightIcon
+        className={`size-3 shrink-0 text-muted-foreground/40 transition-transform duration-150 ${
+          expanded ? "rotate-90" : ""
+        }`}
+      />
+    </button>
+  );
+}
+
 export default function Sidebar() {
   const projects = useStore((store) => store.projects);
   const sidebarThreadsById = useStore((store) => store.sidebarThreadsById);
   const threadIdsByProjectId = useStore((store) => store.threadIdsByProjectId);
-  const { projectExpandedById, projectOrder, threadLastVisitedAtById } = useUiStateStore(
+  const {
+    projectExpandedById,
+    projectOrder,
+    threadLastVisitedAtById,
+    projectGroups,
+    projectGroupOrder,
+    projectGroupExpandedById,
+    projectGroupIdByCwd,
+  } = useUiStateStore(
     useShallow((store) => ({
       projectExpandedById: store.projectExpandedById,
       projectOrder: store.projectOrder,
       threadLastVisitedAtById: store.threadLastVisitedAtById,
+      projectGroups: store.projectGroups,
+      projectGroupOrder: store.projectGroupOrder,
+      projectGroupExpandedById: store.projectGroupExpandedById,
+      projectGroupIdByCwd: store.projectGroupIdByCwd,
     })),
   );
   const markThreadUnread = useUiStateStore((store) => store.markThreadUnread);
   const toggleProject = useUiStateStore((store) => store.toggleProject);
   const reorderProjects = useUiStateStore((store) => store.reorderProjects);
+  const storeToggleGroup = useUiStateStore((store) => store.toggleGroup);
+  const storeCreateGroupAndAssignProject = useUiStateStore(
+    (store) => store.createGroupAndAssignProject,
+  );
+  const storeMoveProjectToGroup = useUiStateStore((store) => store.moveProjectToGroup);
+  const storeRemoveProjectFromGroup = useUiStateStore((store) => store.removeProjectFromGroup);
+  const storeRenameGroup = useUiStateStore((store) => store.renameGroup);
+  const storeDeleteGroup = useUiStateStore((store) => store.deleteGroup);
   const clearComposerDraftForThread = useComposerDraftStore((store) => store.clearDraftThread);
   const getDraftThreadByProjectId = useComposerDraftStore(
     (store) => store.getDraftThreadByProjectId,
@@ -1239,15 +1302,46 @@ export default function Sidebar() {
       const project = projects.find((entry) => entry.id === projectId);
       if (!project) return;
 
+      const currentGroupId = projectGroupIdByCwd[project.cwd];
+      const groupMenuItems = projectGroups
+        .filter((g) => g.id !== currentGroupId)
+        .map((g) => ({ id: `group:${g.id}` as const, label: g.name }));
+
       const clicked = await api.contextMenu.show(
         [
           { id: "copy-path", label: "Copy Project Path" },
+          ...(groupMenuItems.length > 0
+            ? groupMenuItems.map((item) => ({
+                id: item.id,
+                label: `Move to "${item.label}"`,
+              }))
+            : []),
+          { id: "group:new", label: "Move to New Group..." },
+          ...(currentGroupId ? [{ id: "group:remove" as const, label: "Remove from Group" }] : []),
           { id: "delete", label: "Remove project", destructive: true },
         ],
         position,
       );
+      if (!clicked) return;
+
       if (clicked === "copy-path") {
         copyPathToClipboard(project.cwd, { path: project.cwd });
+        return;
+      }
+      if (clicked === "group:new") {
+        const name = window.prompt("Group name:");
+        if (name && name.trim().length > 0) {
+          storeCreateGroupAndAssignProject(name.trim(), project.cwd);
+        }
+        return;
+      }
+      if (clicked === "group:remove") {
+        storeRemoveProjectFromGroup(project.cwd);
+        return;
+      }
+      if (clicked.startsWith("group:")) {
+        const groupId = clicked.slice("group:".length);
+        storeMoveProjectToGroup(project.cwd, groupId);
         return;
       }
       if (clicked !== "delete") return;
@@ -1291,9 +1385,40 @@ export default function Sidebar() {
       clearProjectDraftThreadId,
       copyPathToClipboard,
       getDraftThreadByProjectId,
+      projectGroupIdByCwd,
+      projectGroups,
       projects,
+      storeCreateGroupAndAssignProject,
+      storeMoveProjectToGroup,
+      storeRemoveProjectFromGroup,
       threadIdsByProjectId,
     ],
+  );
+
+  const handleGroupContextMenu = useCallback(
+    async (groupId: string, groupName: string, position: { x: number; y: number }) => {
+      const api = readNativeApi();
+      if (!api) return;
+
+      const clicked = await api.contextMenu.show(
+        [
+          { id: "rename", label: "Rename Group" },
+          { id: "delete", label: "Delete Group", destructive: true },
+        ],
+        position,
+      );
+      if (clicked === "rename") {
+        const name = window.prompt("Rename group:", groupName);
+        if (name && name.trim().length > 0) {
+          storeRenameGroup(groupId, name.trim());
+        }
+        return;
+      }
+      if (clicked === "delete") {
+        storeDeleteGroup(groupId);
+      }
+    },
+    [storeDeleteGroup, storeRenameGroup],
   );
 
   const projectDnDSensors = useSensors(
@@ -1455,6 +1580,27 @@ export default function Sidebar() {
       sidebarThreadsById,
       threadIdsByProjectId,
       threadLastVisitedAtById,
+    ],
+  );
+  type RenderedProject = (typeof renderedProjects)[number];
+  const getRenderedProjectCwd = useCallback((rp: RenderedProject) => rp.project.cwd, []);
+  const groupedSections = useMemo<SidebarSection<RenderedProject>[]>(
+    () =>
+      groupProjectsForSidebar({
+        projects: renderedProjects,
+        getCwd: getRenderedProjectCwd,
+        groups: projectGroups,
+        groupOrder: projectGroupOrder,
+        groupExpandedById: projectGroupExpandedById,
+        groupIdByCwd: projectGroupIdByCwd,
+      }),
+    [
+      getRenderedProjectCwd,
+      renderedProjects,
+      projectGroups,
+      projectGroupOrder,
+      projectGroupExpandedById,
+      projectGroupIdByCwd,
     ],
   );
   const visibleSidebarThreadIds = useMemo(
@@ -2141,24 +2287,74 @@ export default function Sidebar() {
                       items={renderedProjects.map((renderedProject) => renderedProject.project.id)}
                       strategy={verticalListSortingStrategy}
                     >
-                      {renderedProjects.map((renderedProject) => (
-                        <SortableProjectItem
-                          key={renderedProject.project.id}
-                          projectId={renderedProject.project.id}
-                        >
-                          {(dragHandleProps) => renderProjectItem(renderedProject, dragHandleProps)}
-                        </SortableProjectItem>
-                      ))}
+                      {groupedSections.map((section) =>
+                        section.type === "group" ? (
+                          <SidebarMenuItem key={`group:${section.groupId}`} className="rounded-md">
+                            <SidebarGroupHeader
+                              groupId={section.groupId}
+                              groupName={section.groupName}
+                              expanded={section.expanded}
+                              onToggle={storeToggleGroup}
+                              onContextMenu={handleGroupContextMenu}
+                            />
+                            {section.expanded &&
+                              section.projects.map((renderedProject) => (
+                                <SortableProjectItem
+                                  key={renderedProject.project.id}
+                                  projectId={renderedProject.project.id}
+                                >
+                                  {(dragHandleProps) =>
+                                    renderProjectItem(renderedProject, dragHandleProps)
+                                  }
+                                </SortableProjectItem>
+                              ))}
+                          </SidebarMenuItem>
+                        ) : (
+                          section.projects.map((renderedProject) => (
+                            <SortableProjectItem
+                              key={renderedProject.project.id}
+                              projectId={renderedProject.project.id}
+                            >
+                              {(dragHandleProps) =>
+                                renderProjectItem(renderedProject, dragHandleProps)
+                              }
+                            </SortableProjectItem>
+                          ))
+                        ),
+                      )}
                     </SortableContext>
                   </SidebarMenu>
                 </DndContext>
               ) : (
                 <SidebarMenu ref={attachProjectListAutoAnimateRef}>
-                  {renderedProjects.map((renderedProject) => (
-                    <SidebarMenuItem key={renderedProject.project.id} className="rounded-md">
-                      {renderProjectItem(renderedProject, null)}
-                    </SidebarMenuItem>
-                  ))}
+                  {groupedSections.map((section) =>
+                    section.type === "group" ? (
+                      <SidebarMenuItem key={`group:${section.groupId}`} className="rounded-md">
+                        <SidebarGroupHeader
+                          groupId={section.groupId}
+                          groupName={section.groupName}
+                          expanded={section.expanded}
+                          onToggle={storeToggleGroup}
+                          onContextMenu={handleGroupContextMenu}
+                        />
+                        {section.expanded &&
+                          section.projects.map((renderedProject) => (
+                            <SidebarMenuItem
+                              key={renderedProject.project.id}
+                              className="rounded-md"
+                            >
+                              {renderProjectItem(renderedProject, null)}
+                            </SidebarMenuItem>
+                          ))}
+                      </SidebarMenuItem>
+                    ) : (
+                      section.projects.map((renderedProject) => (
+                        <SidebarMenuItem key={renderedProject.project.id} className="rounded-md">
+                          {renderProjectItem(renderedProject, null)}
+                        </SidebarMenuItem>
+                      ))
+                    ),
+                  )}
                 </SidebarMenu>
               )}
 

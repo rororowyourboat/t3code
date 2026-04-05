@@ -16,9 +16,18 @@ const LEGACY_PERSISTED_STATE_KEYS = [
   "codething:renderer-state:v1",
 ] as const;
 
+export interface ProjectGroup {
+  id: string;
+  name: string;
+}
+
 interface PersistedUiState {
   expandedProjectCwds?: string[];
   projectOrderCwds?: string[];
+  projectGroups?: ProjectGroup[];
+  projectGroupOrder?: string[];
+  expandedGroupIds?: string[];
+  projectGroupAssignmentsByCwd?: Record<string, string>;
 }
 
 export interface UiProjectState {
@@ -26,11 +35,18 @@ export interface UiProjectState {
   projectOrder: ProjectId[];
 }
 
+export interface UiGroupState {
+  projectGroups: ProjectGroup[];
+  projectGroupOrder: string[];
+  projectGroupExpandedById: Record<string, boolean>;
+  projectGroupIdByCwd: Record<string, string>;
+}
+
 export interface UiThreadState {
   threadLastVisitedAtById: Record<string, string>;
 }
 
-export interface UiState extends UiProjectState, UiThreadState {}
+export interface UiState extends UiProjectState, UiGroupState, UiThreadState {}
 
 export interface SyncProjectInput {
   id: ProjectId;
@@ -45,13 +61,38 @@ export interface SyncThreadInput {
 const initialState: UiState = {
   projectExpandedById: {},
   projectOrder: [],
+  projectGroups: [],
+  projectGroupOrder: [],
+  projectGroupExpandedById: {},
+  projectGroupIdByCwd: {},
   threadLastVisitedAtById: {},
 };
 
 const persistedExpandedProjectCwds = new Set<string>();
 const persistedProjectOrderCwds: string[] = [];
+const persistedGroups: ProjectGroup[] = [];
+const persistedGroupOrder: string[] = [];
+const persistedExpandedGroupIds = new Set<string>();
+const persistedGroupAssignmentsByCwd: Record<string, string> = {};
 const currentProjectCwdById = new Map<ProjectId, string>();
 let legacyKeysCleanedUp = false;
+
+function hydratedGroupState(): Pick<
+  UiState,
+  "projectGroups" | "projectGroupOrder" | "projectGroupExpandedById" | "projectGroupIdByCwd"
+> {
+  const expandedById: Record<string, boolean> = {};
+  for (const group of persistedGroups) {
+    expandedById[group.id] =
+      persistedExpandedGroupIds.size > 0 ? persistedExpandedGroupIds.has(group.id) : true;
+  }
+  return {
+    projectGroups: [...persistedGroups],
+    projectGroupOrder: [...persistedGroupOrder],
+    projectGroupExpandedById: expandedById,
+    projectGroupIdByCwd: { ...persistedGroupAssignmentsByCwd },
+  };
+}
 
 function readPersistedState(): UiState {
   if (typeof window === "undefined") {
@@ -66,12 +107,12 @@ function readPersistedState(): UiState {
           continue;
         }
         hydratePersistedProjectState(JSON.parse(legacyRaw) as PersistedUiState);
-        return initialState;
+        return { ...initialState, ...hydratedGroupState() };
       }
       return initialState;
     }
     hydratePersistedProjectState(JSON.parse(raw) as PersistedUiState);
-    return initialState;
+    return { ...initialState, ...hydratedGroupState() };
   } catch {
     return initialState;
   }
@@ -88,6 +129,43 @@ function hydratePersistedProjectState(parsed: PersistedUiState): void {
   for (const cwd of parsed.projectOrderCwds ?? []) {
     if (typeof cwd === "string" && cwd.length > 0 && !persistedProjectOrderCwds.includes(cwd)) {
       persistedProjectOrderCwds.push(cwd);
+    }
+  }
+
+  // Hydrate groups
+  persistedGroups.length = 0;
+  persistedGroupOrder.length = 0;
+  persistedExpandedGroupIds.clear();
+  for (const key of Object.keys(persistedGroupAssignmentsByCwd)) {
+    delete persistedGroupAssignmentsByCwd[key];
+  }
+
+  for (const group of parsed.projectGroups ?? []) {
+    if (
+      typeof group === "object" &&
+      group !== null &&
+      typeof group.id === "string" &&
+      typeof group.name === "string"
+    ) {
+      persistedGroups.push({ id: group.id, name: group.name });
+    }
+  }
+  for (const id of parsed.projectGroupOrder ?? []) {
+    if (typeof id === "string" && id.length > 0 && !persistedGroupOrder.includes(id)) {
+      persistedGroupOrder.push(id);
+    }
+  }
+  for (const id of parsed.expandedGroupIds ?? []) {
+    if (typeof id === "string" && id.length > 0) {
+      persistedExpandedGroupIds.add(id);
+    }
+  }
+  const assignments = parsed.projectGroupAssignmentsByCwd;
+  if (assignments && typeof assignments === "object") {
+    for (const [cwd, groupId] of Object.entries(assignments)) {
+      if (typeof cwd === "string" && typeof groupId === "string") {
+        persistedGroupAssignmentsByCwd[cwd] = groupId;
+      }
     }
   }
 }
@@ -107,11 +185,18 @@ function persistState(state: UiState): void {
       const cwd = currentProjectCwdById.get(projectId);
       return cwd ? [cwd] : [];
     });
+    const expandedGroupIds = Object.entries(state.projectGroupExpandedById)
+      .filter(([, expanded]) => expanded)
+      .map(([groupId]) => groupId);
     window.localStorage.setItem(
       PERSISTED_STATE_KEY,
       JSON.stringify({
         expandedProjectCwds,
         projectOrderCwds,
+        projectGroups: state.projectGroups,
+        projectGroupOrder: state.projectGroupOrder,
+        expandedGroupIds,
+        projectGroupAssignmentsByCwd: state.projectGroupIdByCwd,
       } satisfies PersistedUiState),
     );
     if (!legacyKeysCleanedUp) {
@@ -381,6 +466,80 @@ export function reorderProjects(
   };
 }
 
+// ── Group operations ─────────────────────────────────────────────────
+
+export function createGroup(state: UiState, name: string): UiState {
+  const id = crypto.randomUUID();
+  return {
+    ...state,
+    projectGroups: [...state.projectGroups, { id, name }],
+    projectGroupOrder: [...state.projectGroupOrder, id],
+    projectGroupExpandedById: { ...state.projectGroupExpandedById, [id]: true },
+  };
+}
+
+export function createGroupAndAssignProject(
+  state: UiState,
+  name: string,
+  projectCwd: string,
+): UiState {
+  const id = crypto.randomUUID();
+  return {
+    ...state,
+    projectGroups: [...state.projectGroups, { id, name }],
+    projectGroupOrder: [...state.projectGroupOrder, id],
+    projectGroupExpandedById: { ...state.projectGroupExpandedById, [id]: true },
+    projectGroupIdByCwd: { ...state.projectGroupIdByCwd, [projectCwd]: id },
+  };
+}
+
+export function renameGroup(state: UiState, groupId: string, name: string): UiState {
+  const groups = state.projectGroups.map((g) => (g.id === groupId ? { ...g, name } : g));
+  if (groups === state.projectGroups) return state;
+  return { ...state, projectGroups: groups };
+}
+
+export function deleteGroup(state: UiState, groupId: string): UiState {
+  const groups = state.projectGroups.filter((g) => g.id !== groupId);
+  const order = state.projectGroupOrder.filter((id) => id !== groupId);
+  const expanded = { ...state.projectGroupExpandedById };
+  delete expanded[groupId];
+  const assignments = { ...state.projectGroupIdByCwd };
+  for (const [cwd, gid] of Object.entries(assignments)) {
+    if (gid === groupId) delete assignments[cwd];
+  }
+  return {
+    ...state,
+    projectGroups: groups,
+    projectGroupOrder: order,
+    projectGroupExpandedById: expanded,
+    projectGroupIdByCwd: assignments,
+  };
+}
+
+export function toggleGroup(state: UiState, groupId: string): UiState {
+  const expanded = state.projectGroupExpandedById[groupId] ?? true;
+  return {
+    ...state,
+    projectGroupExpandedById: { ...state.projectGroupExpandedById, [groupId]: !expanded },
+  };
+}
+
+export function moveProjectToGroup(state: UiState, projectCwd: string, groupId: string): UiState {
+  if (state.projectGroupIdByCwd[projectCwd] === groupId) return state;
+  return {
+    ...state,
+    projectGroupIdByCwd: { ...state.projectGroupIdByCwd, [projectCwd]: groupId },
+  };
+}
+
+export function removeProjectFromGroup(state: UiState, projectCwd: string): UiState {
+  if (!(projectCwd in state.projectGroupIdByCwd)) return state;
+  const assignments = { ...state.projectGroupIdByCwd };
+  delete assignments[projectCwd];
+  return { ...state, projectGroupIdByCwd: assignments };
+}
+
 interface UiStateStore extends UiState {
   syncProjects: (projects: readonly SyncProjectInput[]) => void;
   syncThreads: (threads: readonly SyncThreadInput[]) => void;
@@ -390,6 +549,13 @@ interface UiStateStore extends UiState {
   toggleProject: (projectId: ProjectId) => void;
   setProjectExpanded: (projectId: ProjectId, expanded: boolean) => void;
   reorderProjects: (draggedProjectId: ProjectId, targetProjectId: ProjectId) => void;
+  createGroup: (name: string) => void;
+  createGroupAndAssignProject: (name: string, projectCwd: string) => void;
+  renameGroup: (groupId: string, name: string) => void;
+  deleteGroup: (groupId: string) => void;
+  toggleGroup: (groupId: string) => void;
+  moveProjectToGroup: (projectCwd: string, groupId: string) => void;
+  removeProjectFromGroup: (projectCwd: string) => void;
 }
 
 export const useUiStateStore = create<UiStateStore>((set) => ({
@@ -406,6 +572,15 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => setProjectExpanded(state, projectId, expanded)),
   reorderProjects: (draggedProjectId, targetProjectId) =>
     set((state) => reorderProjects(state, draggedProjectId, targetProjectId)),
+  createGroup: (name) => set((state) => createGroup(state, name)),
+  createGroupAndAssignProject: (name, projectCwd) =>
+    set((state) => createGroupAndAssignProject(state, name, projectCwd)),
+  renameGroup: (groupId, name) => set((state) => renameGroup(state, groupId, name)),
+  deleteGroup: (groupId) => set((state) => deleteGroup(state, groupId)),
+  toggleGroup: (groupId) => set((state) => toggleGroup(state, groupId)),
+  moveProjectToGroup: (projectCwd, groupId) =>
+    set((state) => moveProjectToGroup(state, projectCwd, groupId)),
+  removeProjectFromGroup: (projectCwd) => set((state) => removeProjectFromGroup(state, projectCwd)),
 }));
 
 useUiStateStore.subscribe((state) => debouncedPersistState.maybeExecute(state));

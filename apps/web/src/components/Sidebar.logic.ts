@@ -539,6 +539,80 @@ export function getProjectSortTimestamp(
   return toSortableTimestamp(project.updatedAt ?? project.createdAt) ?? Number.NEGATIVE_INFINITY;
 }
 
+// ── Project grouping ─────────────────────────────────────────────────
+
+export interface ProjectGroupSection<TProject> {
+  type: "group";
+  groupId: string;
+  groupName: string;
+  expanded: boolean;
+  projects: TProject[];
+}
+
+export interface UngroupedProjectsSection<TProject> {
+  type: "ungrouped";
+  projects: TProject[];
+}
+
+export type SidebarSection<TProject> =
+  | ProjectGroupSection<TProject>
+  | UngroupedProjectsSection<TProject>;
+
+export function groupProjectsForSidebar<TProject>(input: {
+  projects: readonly TProject[];
+  getCwd: (project: TProject) => string;
+  groups: readonly { id: string; name: string }[];
+  groupOrder: readonly string[];
+  groupExpandedById: Record<string, boolean>;
+  groupIdByCwd: Record<string, string>;
+}): SidebarSection<TProject>[] {
+  const { projects, getCwd, groups, groupOrder, groupExpandedById, groupIdByCwd } = input;
+  if (groups.length === 0) {
+    return [{ type: "ungrouped", projects: [...projects] }];
+  }
+
+  const groupsById = new Map(groups.map((g) => [g.id, g]));
+  const projectsByGroupId = new Map<string, TProject[]>();
+  const ungrouped: TProject[] = [];
+
+  for (const project of projects) {
+    const groupId = groupIdByCwd[getCwd(project)];
+    if (groupId && groupsById.has(groupId)) {
+      const existing = projectsByGroupId.get(groupId) ?? [];
+      existing.push(project);
+      projectsByGroupId.set(groupId, existing);
+    } else {
+      ungrouped.push(project);
+    }
+  }
+
+  const orderedGroupIds = new Set(groupOrder);
+  const allGroupIds = [
+    ...groupOrder,
+    ...groups.filter((g) => !orderedGroupIds.has(g.id)).map((g) => g.id),
+  ];
+
+  const sections: SidebarSection<TProject>[] = [];
+  for (const groupId of allGroupIds) {
+    const group = groupsById.get(groupId);
+    const groupProjects = projectsByGroupId.get(groupId);
+    if (!group || !groupProjects || groupProjects.length === 0) continue;
+    sections.push({
+      type: "group",
+      groupId: group.id,
+      groupName: group.name,
+      expanded: groupExpandedById[group.id] ?? true,
+      projects: groupProjects,
+    });
+  }
+
+  if (ungrouped.length > 0) {
+    sections.push({ type: "ungrouped", projects: ungrouped });
+  }
+
+  return sections;
+}
+
 export function sortProjectsForSidebar<
   TProject extends SidebarProject,
   TThread extends Pick<Thread, "projectId" | "createdAt" | "updatedAt"> & SidebarThreadSortInput,
