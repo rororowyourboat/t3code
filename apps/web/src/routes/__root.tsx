@@ -84,6 +84,12 @@ function RootRouteView() {
   if (authGateState.status !== "authenticated") {
     return <Outlet />;
   }
+
+  // Embed routes (e.g. /embed/thread/:environmentId/:threadId) render inside an
+  // external iframe host (see t3-canvas). They need the environment connection
+  // bootstrap, websocket surface, and toasts — but NOT the sidebar/chrome.
+  const isEmbedRoute = pathname.startsWith("/embed/");
+
   return (
     <ToastProvider>
       <AnchoredToastProvider>
@@ -94,9 +100,13 @@ function RootRouteView() {
         <WebSocketConnectionCoordinator />
         <SlowRpcAckToastCoordinator />
         <WebSocketConnectionSurface>
-          <AppSidebarLayout>
+          {isEmbedRoute ? (
             <Outlet />
-          </AppSidebarLayout>
+          ) : (
+            <AppSidebarLayout>
+              <Outlet />
+            </AppSidebarLayout>
+          )}
         </WebSocketConnectionSurface>
       </AnchoredToastProvider>
     </ToastProvider>
