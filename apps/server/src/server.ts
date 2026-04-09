@@ -6,7 +6,9 @@ import {
   attachmentsRouteLayer,
   otlpTracesProxyRouteLayer,
   projectFaviconRouteLayer,
+  serverEnvironmentRouteLayer,
   staticAndDevRouteLayer,
+  browserApiCorsLayer,
 } from "./http";
 import { fixPath } from "./os-jank";
 import { websocketRpcRouteLayer } from "./ws";
@@ -30,6 +32,7 @@ import { OrchestrationProjectionSnapshotQueryLive } from "./orchestration/Layers
 import { CheckpointStoreLive } from "./checkpointing/Layers/CheckpointStore";
 import { GitCoreLive } from "./git/Layers/GitCore";
 import { GitHubCliLive } from "./git/Layers/GitHubCli";
+import { GitStatusBroadcasterLive } from "./git/Layers/GitStatusBroadcaster";
 import { RoutingTextGenerationLive } from "./git/Layers/RoutingTextGeneration";
 import { TerminalManagerLive } from "./terminal/Layers/Manager";
 import { GitManagerLive } from "./git/Layers/GitManager";
@@ -43,11 +46,27 @@ import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor"
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry";
 import { ServerSettingsLive } from "./serverSettings";
 import { ProjectFaviconResolverLive } from "./project/Layers/ProjectFaviconResolver";
+import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdentityResolver";
 import { WorkspaceEntriesLive } from "./workspace/Layers/WorkspaceEntries";
 import { WorkspaceFileSystemLive } from "./workspace/Layers/WorkspaceFileSystem";
 import { WorkspacePathsLive } from "./workspace/Layers/WorkspacePaths";
 import { ProjectSetupScriptRunnerLive } from "./project/Layers/ProjectSetupScriptRunner";
 import { ObservabilityLive } from "./observability/Layers/Observability";
+import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment";
+import {
+  authBearerBootstrapRouteLayer,
+  authBootstrapRouteLayer,
+  authClientsRevokeOthersRouteLayer,
+  authClientsRevokeRouteLayer,
+  authClientsRouteLayer,
+  authPairingLinksRevokeRouteLayer,
+  authPairingLinksRouteLayer,
+  authPairingCredentialRouteLayer,
+  authSessionRouteLayer,
+  authWebSocketTokenRouteLayer,
+} from "./auth/http";
+import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore";
+import { ServerAuthLive } from "./auth/Layers/ServerAuth";
 
 const PtyAdapterLive = Layer.unwrap(
   Effect.gen(function* () {
@@ -161,15 +180,16 @@ const ProviderLayerLive = Layer.unwrap(
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
 
+const GitManagerLayerLive = GitManagerLive.pipe(
+  Layer.provideMerge(ProjectSetupScriptRunnerLive),
+  Layer.provideMerge(GitCoreLive),
+  Layer.provideMerge(GitHubCliLive),
+  Layer.provideMerge(RoutingTextGenerationLive),
+);
+
 const GitLayerLive = Layer.empty.pipe(
-  Layer.provideMerge(
-    GitManagerLive.pipe(
-      Layer.provideMerge(ProjectSetupScriptRunnerLive),
-      Layer.provideMerge(GitCoreLive),
-      Layer.provideMerge(GitHubCliLive),
-      Layer.provideMerge(RoutingTextGenerationLive),
-    ),
-  ),
+  Layer.provideMerge(GitManagerLayerLive),
+  Layer.provideMerge(GitStatusBroadcasterLive.pipe(Layer.provide(GitManagerLayerLive))),
   Layer.provideMerge(GitCoreLive),
 );
 
@@ -182,6 +202,11 @@ const WorkspaceLayerLive = Layer.mergeAll(
     Layer.provide(WorkspacePathsLive),
     Layer.provide(WorkspaceEntriesLive.pipe(Layer.provide(WorkspacePathsLive))),
   ),
+);
+
+const AuthLayerLive = ServerAuthLive.pipe(
+  Layer.provideMerge(PersistenceLayerLive),
+  Layer.provide(ServerSecretStoreLive),
 );
 
 const RuntimeDependenciesLive = ReactorLayerLive.pipe(
@@ -197,6 +222,9 @@ const RuntimeDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(ServerSettingsLive),
   Layer.provideMerge(WorkspaceLayerLive),
   Layer.provideMerge(ProjectFaviconResolverLive),
+  Layer.provideMerge(RepositoryIdentityResolverLive),
+  Layer.provideMerge(ServerEnvironmentLive),
+  Layer.provideMerge(AuthLayerLive),
 
   // Misc.
   Layer.provideMerge(AnalyticsServiceLayerLive),
@@ -209,12 +237,23 @@ const RuntimeServicesLive = ServerRuntimeStartupLive.pipe(
 );
 
 export const makeRoutesLayer = Layer.mergeAll(
+  authBearerBootstrapRouteLayer,
+  authBootstrapRouteLayer,
+  authClientsRevokeOthersRouteLayer,
+  authClientsRevokeRouteLayer,
+  authClientsRouteLayer,
+  authPairingLinksRevokeRouteLayer,
+  authPairingLinksRouteLayer,
+  authPairingCredentialRouteLayer,
+  authSessionRouteLayer,
+  authWebSocketTokenRouteLayer,
   attachmentsRouteLayer,
   otlpTracesProxyRouteLayer,
   projectFaviconRouteLayer,
+  serverEnvironmentRouteLayer,
   staticAndDevRouteLayer,
   websocketRpcRouteLayer,
-);
+).pipe(Layer.provide(browserApiCorsLayer));
 
 export const makeServerLayer = Layer.unwrap(
   Effect.gen(function* () {
